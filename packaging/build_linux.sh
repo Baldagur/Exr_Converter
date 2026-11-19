@@ -38,9 +38,13 @@ print(assets[name])')
 fi
 build_deps/ffmpeg -hide_banner -version | head -1
 
+echo "== self-test from source"
+rm -rf /tmp/exrconv_selftest_src
+QT_QPA_PLATFORM=offscreen python run.py --selftest /tmp/exrconv_selftest_src
+
 echo "== pyinstaller"
 pyinstaller --noconfirm --clean --distpath dist --workpath build packaging/exr_converter.spec
 
 echo "== self-test of the built app"
 rm -rf /tmp/exrconv_selftest
-QT_QPA_PLATFORM=offscreen ./dist/ExrConverter --selftest /tmp/exrconv_selftest
+PYTHONUNBUFFERED=1 QT_QPA_PLATFORM=offscreen ./dist/ExrConverter --selftest /tmp/exrconv_selftest

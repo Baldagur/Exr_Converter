@@ -31,6 +31,10 @@ def _frames(folder: Path, n: int = 4, w: int = 322, h: int = 181) -> list:
 
 
 def run(folder: str = "") -> int:
+    import faulthandler
+
+    faulthandler.enable()
+    sys.stdout.reconfigure(line_buffering=True)
     from .core.color import LOOKS, OUTPUTS, ColorEngine, reference_k1s1
     from .core.exr_io import read_exr
     from .core.movie import CODECS, MovieJob, encode_movie, movie_path, probe
