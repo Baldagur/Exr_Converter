@@ -198,8 +198,10 @@ class ColorEngine:
 
                 self.ocio = OCIO
                 self.config, self.config_name = self._load_config()
-            except ImportError:
+            except Exception as err:  # noqa: BLE001  (keep K1S1 working without OCIO)
                 self.ocio = None
+                self.config = None
+                self.config_name = f"numpy reference (K1S1 only) - OCIO unavailable: {err}"
 
     # -- config -----------------------------------------------------------------------------
     def _load_config(self):

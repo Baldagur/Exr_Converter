@@ -6,7 +6,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PY=${PYTHON:-python3}
+# Set FFMPEG_URL (and FFMPEG_SHA256) to pin an exact ffmpeg build; otherwise the newest BtbN
+# release-branch build is used and its URL + sha256 are recorded in dist/ExrConverter/BUILD_INFO.txt.
 FFMPEG_URL=${FFMPEG_URL:-}
+FFMPEG_SHA256=${FFMPEG_SHA256:-}
 
 "$PY" -m venv .venv-build
 # shellcheck disable=SC1091
@@ -32,6 +35,11 @@ print(assets[name])')
   fi
   echo "$FFMPEG_URL"
   curl -fsSL -o build_deps/ffmpeg.tar.xz "$FFMPEG_URL"
+  SUM=$(sha256sum build_deps/ffmpeg.tar.xz | cut -d' ' -f1)
+  if [ -n "$FFMPEG_SHA256" ] && [ "$SUM" != "$FFMPEG_SHA256" ]; then
+    echo "ffmpeg checksum mismatch: $SUM" >&2; exit 1
+  fi
+  printf '%s\n%s\n' "$FFMPEG_URL" "$SUM" > build_deps/ffmpeg.source
   tar -xJf build_deps/ffmpeg.tar.xz -C build_deps --strip-components=2 --wildcards '*/bin/ffmpeg'
   rm -f build_deps/ffmpeg.tar.xz
   chmod +x build_deps/ffmpeg
@@ -39,14 +47,20 @@ fi
 build_deps/ffmpeg -hide_banner -version | head -1
 
 echo "== self-test from source"
-rm -rf /tmp/exrconv_selftest_src /tmp/ng
-EXRCONV_SELFTEST_NOGUI=1 EXRCONV_FFMPEG="$PWD/build_deps/ffmpeg" python run.py --selftest /tmp/ng || echo "NOGUI EXIT $?"
-echo "NOGUI done"
+rm -rf /tmp/exrconv_selftest_src
 EXRCONV_FFMPEG="$PWD/build_deps/ffmpeg" QT_QPA_PLATFORM=offscreen python run.py --selftest /tmp/exrconv_selftest_src
 
 echo "== pyinstaller"
 pyinstaller --noconfirm --clean --distpath dist --workpath build packaging/exr_converter.spec
 
+echo "== build info"
+{
+  echo "EXR Converter build $(date -u +%Y-%m-%dT%H:%MZ) commit ${GITHUB_SHA:-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)}"
+  echo; echo "ffmpeg:"; build_deps/ffmpeg -hide_banner -version | head -1; cat build_deps/ffmpeg.source 2>/dev/null || true
+  echo; echo "Python packages:"; python -m pip freeze
+} > dist/ExrConverter/BUILD_INFO.txt
+cat dist/ExrConverter/BUILD_INFO.txt
+
 echo "== self-test of the built app"
 rm -rf /tmp/exrconv_selftest
-PYTHONUNBUFFERED=1 QT_QPA_PLATFORM=offscreen ./dist/ExrConverter --selftest /tmp/exrconv_selftest
+PYTHONUNBUFFERED=1 QT_QPA_PLATFORM=offscreen ./dist/ExrConverter/ExrConverter --selftest /tmp/exrconv_selftest

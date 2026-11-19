@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import errno
+import os
 import subprocess
+import tempfile
 import threading
 from dataclasses import dataclass
 from fractions import Fraction
@@ -23,7 +26,8 @@ CODECS = {
     "h264": "H.264",
 }
 FPS_CHOICES = ["23.976", "24", "25", "29.97", "30", "48", "50", "59.94", "60"]
-_FPS_EXACT = {"23.976": "24000/1001", "29.97": "30000/1001", "47.952": "48000/1001", "59.94": "60000/1001"}
+_FPS_EXACT = {"23.976": "24000/1001", "23.98": "24000/1001", "29.97": "30000/1001",
+              "47.952": "48000/1001", "47.95": "48000/1001", "59.94": "60000/1001", "59.95": "60000/1001"}
 
 
 def fps_rational(fps: str) -> Fraction:
@@ -32,7 +36,7 @@ def fps_rational(fps: str) -> Fraction:
         return Fraction(_FPS_EXACT[fps])
     val = Fraction(fps).limit_denominator(1001)
     for k, v in _FPS_EXACT.items():
-        if abs(float(val) - float(Fraction(v))) < 0.002:
+        if abs(float(val) - float(Fraction(v))) < 0.005:
             return Fraction(v)
     return val
 
@@ -83,12 +87,16 @@ def build_command(ffmpeg: str, w: int, h: int, fps: Fraction, codec: str, half: 
                   out_path: Path, timecode: Optional[str] = None) -> List[str]:
     ow, oh = output_size(w, h, half, codec)
     rate = f"{fps.numerator}/{fps.denominator}"
-    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-n",
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
            "-f", "rawvideo", "-pix_fmt", "rgb48le", "-s", f"{w}x{h}", "-framerate", rate, "-i", "-"]
     pix = "yuv420p" if codec == "h264" else "yuv422p10le"
-    vf = (f"scale={ow}:{oh}:flags=lanczos+accurate_rnd+full_chroma_int:"
-          f"in_range=pc:out_range=tv:out_color_matrix=bt709,format={pix}")
-    cmd += ["-vf", vf]
+    filters = []
+    if not half and (ow, oh) != (w, h):
+        filters.append(f"crop={ow}:{oh}:0:0")  # parity fix only: crop 1px, don't resample
+    filters.append(f"scale={ow}:{oh}:flags=lanczos+accurate_rnd+full_chroma_int:"
+                   f"in_range=pc:out_range=tv:out_color_matrix=bt709")
+    filters.append(f"format={pix}")
+    cmd += ["-vf", ",".join(filters)]
     if codec == "h264":
         cmd += ["-c:v", "libx264", "-preset", "slow", "-crf", "16", "-profile:v", "high",
                 "-movflags", "+faststart+write_colr"]
@@ -137,36 +145,59 @@ def encode_movie(job: MovieJob, engine: ColorEngine,
     first, info = read_exr(job.seq.path(job.start))
     w, h = info.width, info.height
     tc = info.timecode if (job.use_header_timecode and info.timecode) else frame_to_timecode(job.start, fps)
-    cmd = build_command(ffmpeg_path(), w, h, fps, job.codec, job.half, job.output, job.out_path, tc)
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    # Encode to a private temp name, then link it into place without overwriting. On failure only
+    # the temp file (ours) is removed, never a file someone else created under the final name.
+    tmp = job.out_path.with_name(f".{job.out_path.stem}.{os.getpid()}.{threading.get_ident()}.partial.mov")
+    cmd = build_command(ffmpeg_path(), w, h, fps, job.codec, job.half, job.output, tmp, tc)
     total = job.end - job.start + 1
-    err_text = ""
-    try:
-        for i, frame in enumerate(range(job.start, job.end + 1)):
-            if cancel is not None and cancel.is_set():
-                raise MovieCancelled()
-            rgb = first if i == 0 else read_exr(job.seq.path(frame))[0]
-            if rgb.shape[:2] != (h, w):
-                raise ValueError(f"Frame {frame} is {rgb.shape[1]}x{rgb.shape[0]}, expected {w}x{h}.")
-            disp = engine.convert(rgb, job.look, job.output)
-            proc.stdin.write(quantize(disp, 16).astype("<u2").tobytes())
-            if progress:
-                progress(i + 1, total)
-        proc.stdin.close()
-        err_text = proc.stderr.read().decode(errors="replace")
-        if proc.wait() != 0:
-            raise RuntimeError(f"ffmpeg failed:\n{err_text[-800:]}")
-    except BrokenPipeError:
-        err_text = proc.stderr.read().decode(errors="replace")
-        proc.wait()
-        _remove(job.out_path)
-        raise RuntimeError(f"ffmpeg stopped:\n{err_text[-800:]}")
-    except BaseException:
-        proc.kill()
-        proc.wait()
-        _remove(job.out_path)
-        raise
+    with tempfile.TemporaryFile() as errlog:
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=errlog)
+
+        def ffmpeg_error() -> str:
+            errlog.seek(0)
+            return errlog.read().decode(errors="replace")[-800:]
+
+        try:
+            for i, frame in enumerate(range(job.start, job.end + 1)):
+                if cancel is not None and cancel.is_set():
+                    raise MovieCancelled()
+                rgb = first if i == 0 else read_exr(job.seq.path(frame))[0]
+                if rgb.shape[:2] != (h, w):
+                    raise ValueError(f"Frame {frame} is {rgb.shape[1]}x{rgb.shape[0]}, expected {w}x{h}.")
+                disp = engine.convert(rgb, job.look, job.output)
+                try:
+                    proc.stdin.write(quantize(disp, 16).astype("<u2").tobytes())
+                except BrokenPipeError:
+                    proc.wait()
+                    raise RuntimeError(f"ffmpeg stopped:\n{ffmpeg_error()}")
+                if progress:
+                    progress(i + 1, total)
+            proc.stdin.close()
+            if proc.wait() != 0:
+                raise RuntimeError(f"ffmpeg failed:\n{ffmpeg_error()}")
+            _link_into_place(tmp, job.out_path)
+        except BaseException:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            _remove(tmp)
+            raise
     return job.out_path
+
+
+def _link_into_place(tmp: Path, final: Path) -> None:
+    try:
+        os.link(tmp, final)  # atomic, raises FileExistsError instead of overwriting
+    except FileExistsError:
+        raise FileExistsError(f"{final.name} appeared while encoding; your movie was not saved over it.")
+    except OSError as err:
+        if err.errno not in (errno.EPERM, errno.EXDEV, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EMLINK):
+            raise
+        if final.exists():  # filesystem without hard links: best effort
+            raise FileExistsError(f"{final.name} appeared while encoding; your movie was not saved over it.")
+        os.replace(tmp, final)
+        return
+    tmp.unlink()
 
 
 def _remove(p: Path) -> None:

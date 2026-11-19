@@ -34,6 +34,31 @@ def test_sequence_detection(tmp_path):
     assert detect_sequence(tmp_path / "single.exr") is None
 
 
+def test_versions_and_case_are_not_sequences(tmp_path):
+    for n in ("shot_v001.exr", "shot_v002.exr", "Plate.1001.exr", "plate.1002.exr", "plate.1003.EXR"):
+        (tmp_path / n).write_bytes(b"x")
+    assert detect_sequence(tmp_path / "shot_v001.exr") is None
+    assert detect_sequence(tmp_path / "plate.1002.exr") is None  # only one frame with that exact case
+
+
+def test_still_name_keeps_frame_last(tmp_path):
+    src = tmp_path / "shot.1001.exr"
+    src.write_bytes(b"x")
+    assert output_path(src, "rec709", ".png").name == "shot_rec709.1001.png"
+    (tmp_path / "shot_rec709.1001.png").write_bytes(b"x")
+    assert output_path(src, "rec709", ".png").name == "shot_rec709_2.1001.png"
+
+
+def test_writers_never_overwrite(tmp_path):
+    from exr_converter.core.output import write_still
+    p = tmp_path / "a.png"
+    p.write_bytes(b"keep")
+    for fmt in ("png16", "png8", "jpeg"):
+        with pytest.raises(FileExistsError):
+            write_still(p, np.zeros((2, 2, 3), np.float32), fmt, "rec709")
+    assert p.read_bytes() == b"keep"
+
+
 @pytest.mark.parametrize("bits", [8, 16])
 def test_png_roundtrip(tmp_path, bits):
     rng = np.random.default_rng(1)
@@ -65,6 +90,7 @@ def test_fps_and_timecode():
     assert fps_rational("23.976") == Fraction(24000, 1001)
     assert fps_rational("25") == 25
     assert fps_rational("24000/1001") == Fraction(24000, 1001)
+    assert fps_rational("23.98") == Fraction(24000, 1001)
     assert frame_to_timecode(1001, Fraction(24)) == "00:00:41:17"
 
 
@@ -76,7 +102,8 @@ def test_sizes_and_command(tmp_path):
                         "01:00:00:00")
     s = " ".join(cmd)
     assert "prores_ks" in s and "-profile:v 3" in s and "scale=1920:1080" in s and "-timecode 01:00:00:00" in s
-    assert "-n" in cmd  # never overwrite
+    odd = build_command("ffmpeg", 1919, 1081, Fraction(24), "h264", False, "rec709", tmp_path / "o.mov")
+    assert "crop=1918:1080:0:0" in " ".join(odd)  # parity fixed by cropping, not resampling
 
 
 def test_compare_helpers():

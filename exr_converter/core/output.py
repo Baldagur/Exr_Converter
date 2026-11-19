@@ -17,15 +17,31 @@ FORMATS = {
 
 
 def output_path(src: Path, suffix: str, ext: str, out_dir: Optional[Path] = None) -> Path:
-    """name.exr -> name_<suffix><ext>. Never returns an existing file or the source itself."""
+    """name.exr -> name_<suffix><ext>; shot.1001.exr -> shot_<suffix>.1001<ext> (frame number stays
+    last so Nuke/RV still see a sequence). Never returns an existing file or the source itself."""
+    from .sequence import split_frame
+
     src = Path(src)
     folder = Path(out_dir) if out_dir else src.parent
-    base = f"{src.stem}_{suffix}"
-    p = folder / f"{base}{ext}"
-    n = 2
+    parts = split_frame(src.name)
+    if parts:
+        head, digits, _tail = parts
+        sep = head[-1]
+        stem = head[:-1].rstrip("._-") or "image"
+
+        def name(n: int) -> str:
+            extra = f"_{n}" if n > 1 else ""
+            return f"{stem}_{suffix}{extra}{sep}{digits}{ext}"
+    else:
+        def name(n: int) -> str:
+            extra = f"_{n}" if n > 1 else ""
+            return f"{src.stem}_{suffix}{extra}{ext}"
+
+    n = 1
+    p = folder / name(n)
     while p.exists() or p.resolve() == src.resolve():
-        p = folder / f"{base}_{n}{ext}"
         n += 1
+        p = folder / name(n)
     return p
 
 
@@ -40,8 +56,8 @@ def _chunk(tag: bytes, data: bytes) -> bytes:
     return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
 
 
-def write_png(path: Path, img: np.ndarray, srgb_tag: bool = False) -> None:
-    """Write an RGB PNG, 8-bit (uint8) or 16-bit (uint16)."""
+def png_bytes(img: np.ndarray, srgb_tag: bool = False) -> bytes:
+    """Encode an RGB PNG, 8-bit (uint8) or 16-bit (uint16)."""
     h, w = img.shape[:2]
     bits = 16 if img.dtype == np.uint16 else 8
     rows = img.astype(">u2" if bits == 16 else np.uint8).reshape(h, -1).view(np.uint8)
@@ -52,7 +68,13 @@ def write_png(path: Path, img: np.ndarray, srgb_tag: bool = False) -> None:
         out += _chunk(b"sRGB", b"\x00")
     out += _chunk(b"IDAT", zlib.compress(raw, 6))
     out += _chunk(b"IEND", b"")
-    Path(path).write_bytes(bytes(out))
+    return bytes(out)
+
+
+def write_png(path: Path, img: np.ndarray, srgb_tag: bool = False) -> None:
+    """Write a PNG; fails with FileExistsError instead of overwriting."""
+    with open(path, "xb") as fh:
+        fh.write(png_bytes(img, srgb_tag))
 
 
 def _read_png_own(data: bytes) -> Optional[np.ndarray]:
@@ -103,8 +125,6 @@ def read_image(path: Path) -> Tuple[np.ndarray, int]:
 def write_still(path: Path, display: np.ndarray, fmt: str, output: str, jpeg_quality: int = 95) -> np.ndarray:
     """Quantise and write. Returns the integer image that was written."""
     path = Path(path)
-    if path.exists():
-        raise FileExistsError(f"Refusing to overwrite {path}")
     if fmt == "png16":
         img = quantize(display, 16)
         write_png(path, img, srgb_tag=(output == "srgb"))
@@ -115,7 +135,14 @@ def write_still(path: Path, display: np.ndarray, fmt: str, output: str, jpeg_qua
         from PIL import Image
 
         img = quantize(display, 8)
-        Image.fromarray(img, "RGB").save(path, "JPEG", quality=int(jpeg_quality), subsampling=0, optimize=True)
+        with open(path, "xb") as fh:  # exclusive create: never overwrites
+            try:
+                Image.fromarray(img, "RGB").save(fh, "JPEG", quality=int(jpeg_quality), subsampling=0,
+                                                 optimize=True)
+            except BaseException:
+                fh.close()
+                path.unlink()
+                raise
     else:
         raise ValueError(f"Unknown format {fmt}")
     return img

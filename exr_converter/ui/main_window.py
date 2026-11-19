@@ -12,7 +12,7 @@ from PySide6.QtCore import QSettings, QThread, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox, QProgressBar,
-    QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter, QVBoxLayout, QWidget,
+    QProgressDialog, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter, QVBoxLayout, QWidget,
 )
 
 from .. import APP_NAME, __version__
@@ -280,6 +280,10 @@ class MainWindow(QMainWindow):
             i = combo.findData(s.value(key, combo.currentData()))
             if i >= 0:
                 combo.setCurrentIndex(i)
+        if not self.engine.has_aces:  # never restore a disabled choice
+            for combo in (self.cmb_look, self.cmb_alook):
+                if combo.currentData() == "aces":
+                    combo.setCurrentIndex(combo.findData("k1s1"))
         self.chk_lookname.setChecked(s.value("lookname", False, type=bool))
         self.spn_quality.setValue(int(s.value("quality", 95)))
 
@@ -299,7 +303,9 @@ class MainWindow(QMainWindow):
                 e.ignore()
                 return
             self.movie_thread.cancel_event.set()
-            self.movie_thread.wait(10000)
+            self.statusBar().showMessage("Cancelling the QuickTime export…")
+            while not self.movie_thread.wait(200):  # never destroy a running thread
+                QApplication.processEvents()
         self._save_settings()
         super().closeEvent(e)
 
@@ -548,10 +554,19 @@ class MainWindow(QMainWindow):
             return
         ext = FORMATS[self.fmt][1]
         written, errors = [], []
+        dlg = QProgressDialog("Exporting stills…", "Cancel", 0, len(self.files), self)
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumDuration(400)
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             current = self.files[self.file_list.currentRow()] if self.file_list.currentRow() >= 0 else None
-            for p in self.files:
+            for i, p in enumerate(self.files):
+                dlg.setValue(i)
+                dlg.setLabelText(f"Exporting {p.name} ({i + 1}/{len(self.files)})")
+                QApplication.processEvents()
+                if dlg.wasCanceled():
+                    errors.append("Cancelled; the remaining files were not exported.")
+                    break
                 try:
                     if p == current and self.src is not None:
                         rgb = self.src
@@ -566,6 +581,7 @@ class MainWindow(QMainWindow):
                 except Exception as err:  # noqa: BLE001
                     errors.append(f"{p.name}: {err}")
         finally:
+            dlg.setValue(len(self.files))
             QApplication.restoreOverrideCursor()
         msg = f"Wrote {len(written)} file(s)" + (f": {written[0].name}" if len(written) == 1 else "")
         self.statusBar().showMessage(msg, 8000)

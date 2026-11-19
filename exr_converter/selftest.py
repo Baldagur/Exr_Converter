@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 
 
-def _frames(folder: Path, n: int = 4, w: int = 322, h: int = 181) -> list:
+def _frames(folder: Path, n: int = 4, w: int = 321, h: int = 181) -> list:
     from .core.exr_io import write_exr
 
     paths = []
@@ -60,7 +60,7 @@ def run(folder: str = "") -> int:
 
     frames = _frames(out)
     rgb, info = read_exr(frames[0])
-    check(info.width == 322 and info.height == 181, f"EXR read back at 322x181 via {info.reader}")
+    check(info.width == 321 and info.height == 181, f"EXR read back at 321x181 via {info.reader}")
     check(abs(float(rgb[5, 5, 0]) - 0.18) < 1e-3, "EXR grey value preserved")
 
     k = engine.convert(rgb, "k1s1", "rec709")
@@ -96,7 +96,7 @@ def run(folder: str = "") -> int:
             mp = movie_path(seq, "rec709", half, "k1s1", True)
             encode_movie(MovieJob(seq, 1001, 1004, "k1s1", "rec709", codec, half, "23.976", mp), engine)
             desc = [ln.strip() for ln in probe(mp).splitlines() if "Video:" in ln]
-            size = ("160x90" if half else ("322x180" if codec == "h264" else "322x181"))
+            size = ("160x90" if half else ("320x180" if codec == "h264" else "321x181"))
             check(bool(desc) and size in desc[0], f"{mp.name}: {desc[0] if desc else 'no video stream'}")
 
     import os
@@ -134,7 +134,7 @@ def _gui_test(out, frames, engine, check):
         before = set(out.iterdir())
         win.export_stills()
         new = [p.name for p in set(out.iterdir()) - before]
-        check(any(n.endswith("_sRGB.png") for n in new), f"GUI still export: {new}")
+        check(any("_sRGB." in n and n.endswith(".png") for n in new), f"GUI still export: {new}")
         check(win.seq is not None and win.btn_movie.isEnabled(), "GUI sees the sequence")
         win.close()
         win.deleteLater()

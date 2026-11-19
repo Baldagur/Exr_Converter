@@ -1,4 +1,4 @@
-# PyInstaller spec: one double-clickable Linux executable with the K1S1 LUT, OCIO and ffmpeg inside.
+# PyInstaller spec: one folder with a double-clickable Linux executable with the K1S1 LUT, OCIO and ffmpeg inside.
 # Build with packaging/build_linux.sh (needs internet once, on the build machine only).
 import glob
 import os
@@ -31,16 +31,24 @@ a = Analysis(  # noqa: F821
     noarchive=False,
 )
 pyz = PYZ(a.pure)  # noqa: F821
+# onedir (not onefile): nothing is unpacked to /tmp at launch, so it starts fast and works when
+# /tmp is mounted noexec (common on hardened Rocky installs).
 exe = EXE(  # noqa: F821
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="ExrConverter",
     debug=False,
     strip=False,
     upx=False,
     console=False,
-    runtime_tmpdir=None,
+)
+coll = COLLECT(  # noqa: F821
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name="ExrConverter",
 )
