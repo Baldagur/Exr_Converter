@@ -36,8 +36,11 @@ jobs:
           cp dist/ExrConverter README.md release/ExrConverter/
           tar -C release -czf ExrConverter-linux-x86_64.tar.gz ExrConverter
 
+      # Account-wide artifact storage can fill up; releases don't count, so don't fail the build on it.
       - uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
+          retention-days: 7
           name: ExrConverter-linux-x86_64
           path: ExrConverter-linux-x86_64.tar.gz
 
