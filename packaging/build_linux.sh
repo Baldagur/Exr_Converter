@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PY=${PYTHON:-python3}
-FFMPEG_URL=${FFMPEG_URL:-https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-linux64-gpl-7.1.tar.xz}
+FFMPEG_URL=${FFMPEG_URL:-}
 
 "$PY" -m venv .venv-build
 # shellcheck disable=SC1091
@@ -20,6 +20,17 @@ python -m pytest -q tests
 mkdir -p build_deps
 if [ ! -x build_deps/ffmpeg ]; then
   echo "== downloading static ffmpeg"
+  if [ -z "$FFMPEG_URL" ]; then
+    # Newest release-branch static GPL build from BtbN (has libx264 + prores_ks), else master.
+    FFMPEG_URL=$(curl -fsSL https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest | python -c '
+import json, re, sys
+assets = {a["name"]: a["browser_download_url"] for a in json.load(sys.stdin)["assets"]}
+rel = [n for n in assets if re.fullmatch(r"ffmpeg-n[\d.]+-latest-linux64-gpl-[\d.]+\.tar\.xz", n)]
+key = lambda n: [int(x) for x in re.findall(r"\d+", n.split("-")[1])]
+name = max(rel, key=key) if rel else "ffmpeg-master-latest-linux64-gpl.tar.xz"
+print(assets[name])')
+  fi
+  echo "$FFMPEG_URL"
   curl -fsSL -o build_deps/ffmpeg.tar.xz "$FFMPEG_URL"
   tar -xJf build_deps/ffmpeg.tar.xz -C build_deps --strip-components=2 --wildcards '*/bin/ffmpeg'
   rm -f build_deps/ffmpeg.tar.xz
