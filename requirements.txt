@@ -1,0 +1,5 @@
+numpy>=1.24,<3
+PySide6-Essentials>=6.6,<6.10
+opencolorio>=2.3,<2.6
+OpenEXR>=3.3,<4
+Pillow>=10
