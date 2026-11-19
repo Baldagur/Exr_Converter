@@ -297,9 +297,13 @@ class ColorEngine:
         return self._cache[key]
 
     def convert(self, acescg: np.ndarray, look: str, output: str) -> np.ndarray:
-        """ACEScg float (H, W, 3) -> display float (H, W, 3), not clamped."""
+        """ACEScg float (H, W, 3) -> display float (H, W, 3) in 0..1.
+
+        The LUT and the ACES ODT already end in 0..1; OCIO's ACES sRGB display can leave small
+        negatives for out-of-gamut colours, which the ACES CTL clamps, so clamp here too.
+        """
         clean = sanitize(acescg)
-        return self.transform(look, output)(clean)
+        return np.clip(self.transform(look, output)(clean), 0.0, 1.0)
 
 
 def sanitize(rgb: np.ndarray) -> np.ndarray:

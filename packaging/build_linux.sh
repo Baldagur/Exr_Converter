@@ -39,7 +39,9 @@ fi
 build_deps/ffmpeg -hide_banner -version | head -1
 
 echo "== self-test from source"
-rm -rf /tmp/exrconv_selftest_src
+rm -rf /tmp/exrconv_selftest_src /tmp/ng
+EXRCONV_SELFTEST_NOGUI=1 EXRCONV_FFMPEG="$PWD/build_deps/ffmpeg" python run.py --selftest /tmp/ng || echo "NOGUI EXIT $?"
+echo "NOGUI done"
 EXRCONV_FFMPEG="$PWD/build_deps/ffmpeg" QT_QPA_PLATFORM=offscreen python run.py --selftest /tmp/exrconv_selftest_src
 
 echo "== pyinstaller"

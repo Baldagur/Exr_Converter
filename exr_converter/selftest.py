@@ -99,6 +99,18 @@ def run(folder: str = "") -> int:
             size = ("160x90" if half else ("322x180" if codec == "h264" else "322x181"))
             check(bool(desc) and size in desc[0], f"{mp.name}: {desc[0] if desc else 'no video stream'}")
 
+    import os
+
+    if os.environ.get("EXRCONV_SELFTEST_NOGUI"):
+        print("  (GUI test skipped)")
+    else:
+        _gui_test(out, frames, engine, check)
+
+    print("\nSELFTEST " + ("PASSED" if not failures else f"FAILED ({len(failures)})"))
+    return 0 if not failures else 1
+
+
+def _gui_test(out, frames, engine, check):
     try:
         from PySide6.QtWidgets import QApplication
 
@@ -125,12 +137,11 @@ def run(folder: str = "") -> int:
         check(any(n.endswith("_sRGB.png") for n in new), f"GUI still export: {new}")
         check(win.seq is not None and win.btn_movie.isEnabled(), "GUI sees the sequence")
         win.close()
+        win.deleteLater()
+        app.processEvents()
     except Exception:  # noqa: BLE001
         traceback.print_exc()
         check(False, "GUI off-screen test")
-
-    print("\nSELFTEST " + ("PASSED" if not failures else f"FAILED ({len(failures)})"))
-    return 0 if not failures else 1
 
 
 if __name__ == "__main__":
