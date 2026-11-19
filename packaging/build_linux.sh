@@ -40,7 +40,7 @@ build_deps/ffmpeg -hide_banner -version | head -1
 
 echo "== self-test from source"
 rm -rf /tmp/exrconv_selftest_src
-QT_QPA_PLATFORM=offscreen python run.py --selftest /tmp/exrconv_selftest_src
+EXRCONV_FFMPEG="$PWD/build_deps/ffmpeg" QT_QPA_PLATFORM=offscreen python run.py --selftest /tmp/exrconv_selftest_src
 
 echo "== pyinstaller"
 pyinstaller --noconfirm --clean --distpath dist --workpath build packaging/exr_converter.spec
