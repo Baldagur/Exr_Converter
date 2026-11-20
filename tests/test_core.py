@@ -129,3 +129,27 @@ def test_ocio_aces_grey(output):
     eng = ColorEngine()
     g = eng.convert(np.full((1, 1, 3), 0.18, np.float32), "aces", output)[0, 0, 0]
     assert 0.3 < g < 0.5, g
+
+
+def test_choose_beauty_ignores_aovs():
+    from exr_converter.core.exr_io import choose_beauty
+    assert choose_beauty([("", ["A", "B", "G", "R", "Z", "diffuse.R", "diffuse.G", "diffuse.B"])])[1] == ""
+    pi, layer, comps = choose_beauty([("", ["ViewLayer.Combined.R", "ViewLayer.Combined.G", "ViewLayer.Combined.B",
+                                            "ViewLayer.DiffCol.R", "ViewLayer.DiffCol.G", "ViewLayer.DiffCol.B"])])
+    assert layer == "ViewLayer.Combined" and comps["R"] == "ViewLayer.Combined.R"
+    assert choose_beauty([("diffuse", ["R", "G", "B"]), ("beauty", ["R", "G", "B", "A"])])[0] == 1
+    with pytest.raises(ValueError, match="No RGB"):
+        choose_beauty([("", ["Z", "N.X"])])
+
+
+def test_reads_cg_multichannel_files(tmp_path):
+    pytest.importorskip("OpenEXR")
+    from exr_converter.core import exr_io
+    files = exr_io.write_cg_test_files(tmp_path)
+    for label, (path, expected) in files.items():
+        rgb, info = exr_io.read_exr(path)
+        assert info.reader == "OpenEXR", (label, info.notes)
+        assert np.allclose(rgb, expected, atol=1e-3), label
+        # the full reader must work too, not only the fast single-part path
+        rgb2 = exr_io._read_new(path)[0]
+        assert np.allclose(rgb2, expected, atol=1e-3), label

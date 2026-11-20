@@ -84,8 +84,12 @@ def _timecode(value: Any) -> Optional[str]:
     if value is None:
         return None
     try:
-        h, m, s, f = (int(getattr(value, k)) for k in ("hours", "minutes", "seconds", "frame"))
-        sep = ";" if getattr(value, "dropFrame", False) else ":"
+        def get(k):
+            v = getattr(value, k)
+            return v() if callable(v) else v
+
+        h, m, s, f = (int(get(k)) for k in ("hours", "minutes", "seconds", "frame"))
+        sep = ";" if get("dropFrame") else ":"
         return f"{h:02d}:{m:02d}:{s:02d}{sep}{f:02d}"
     except Exception:  # noqa: BLE001
         pass
@@ -110,37 +114,127 @@ def _chroma(value: Any) -> Optional[Tuple[float, ...]]:
         return None
 
 
-def _pick_rgb(chans: Dict[str, Any]) -> Tuple[np.ndarray, str]:
-    def px(key):
-        return np.asarray(chans[key].pixels if hasattr(chans[key], "pixels") else chans[key])
+# ---------------------------------------------------------------------------------------------
+# Picking the main image out of multichannel / multipart CG renders
+# ---------------------------------------------------------------------------------------------
+_COMP = {"R": "R", "G": "G", "B": "B", "A": "A", "Y": "Y",
+         "RED": "R", "GREEN": "G", "BLUE": "B", "ALPHA": "A"}
+# Layer names that mean "the main image" (last path segment, case-insensitive). "" = no prefix.
+_BEAUTY = ("", "beauty", "rgba", "rgb", "combined", "main", "color", "colour", "default", "image")
 
-    keys = list(chans.keys())
-    for k in ("RGBA", "RGB"):
-        if k in chans:
-            arr = px(k)
-            return arr[..., :3], k
-    for k in keys:
-        if k.endswith(".RGBA") or k.endswith(".RGB"):
-            arr = px(k)
-            return arr[..., :3], k
-    if all(c in chans for c in "RGB"):
-        return np.stack([px("R"), px("G"), px("B")], axis=-1), "R,G,B"
-    if "Y" in chans:
-        y = px("Y")
-        return np.stack([y, y, y], axis=-1), "Y"
-    raise ValueError(f"No RGB channels found (channels: {', '.join(keys)})")
+
+def _layers(names) -> Dict[str, Dict[str, str]]:
+    """{'': {'R': 'R', ...}, 'diffuse': {'R': 'diffuse.R', ...}} in order of appearance."""
+    out: Dict[str, Dict[str, str]] = {}
+    for n in names:
+        layer, _, comp = str(n).rpartition(".")
+        c = _COMP.get(comp.upper())
+        if c:
+            out.setdefault(layer, {}).setdefault(c, str(n))
+    return out
+
+
+def choose_beauty(parts) -> Tuple[int, str, Dict[str, str]]:
+    """parts: [(part_name, [channel names]), ...] -> (part index, layer, {'R': name, 'G': ..., 'B': ...}).
+
+    Picks the main RGB(A) and ignores every other AOV. Order of preference: unprefixed R/G/B, then a
+    layer called beauty/rgba/combined/..., then (multipart) a part with such a name, then the
+    first layer that has R, G and B, then a luminance-only Y channel.
+    """
+    best = None
+    for pi, (pname, names) in enumerate(parts):
+        pname_l = (pname or "").lower().rpartition(".")[2]
+        for li, (layer, comps) in enumerate(_layers(names).items()):
+            seg = layer.lower().rpartition(".")[2]
+            if all(c in comps for c in "RGB"):
+                if layer == "" and pname_l in _BEAUTY:  # unnamed part counts ("" is in _BEAUTY)
+                    score = 0
+                elif layer == "":
+                    score = 1
+                elif seg in _BEAUTY:
+                    score = 2
+                elif pname_l in _BEAUTY:
+                    score = 3
+                else:
+                    score = 4
+            elif "Y" in comps and layer == "":
+                score = 5
+                comps = {"R": comps["Y"], "G": comps["Y"], "B": comps["Y"], **({"A": comps["A"]} if "A" in comps else {})}
+            else:
+                continue
+            key = (score, pi, li)
+            if best is None or key < best[0]:
+                best = (key, pi, layer, comps)
+    if best is None:
+        listing = "; ".join(f"{n or f'part {i}'}: {', '.join(map(str, ch[:12]))}{' …' if len(ch) > 12 else ''}"
+                            for i, (n, ch) in enumerate(parts))
+        raise ValueError(f"No RGB channels found. Channels in the file: {listing}")
+    return best[1], best[2], best[3]
+
+
+def _describe(parts, pi, layer, comps) -> str:
+    total = sum(len(ch) for _, ch in parts)
+    where = f"part '{parts[pi][0] or pi}', " if len(parts) > 1 else ""
+    used = ", ".join(comps[c] for c in "RGBA" if c in comps)
+    extra = f"{total} channels" + (f" in {len(parts)} parts" if len(parts) > 1 else "")
+    return f"{extra}; using {where}{used}" + ("" if total <= 4 else " (other channels ignored)")
+
+
+def _read_legacy(path: Path):
+    """Fast path: read only the beauty channels (single-part files) with the classic API."""
+    import Imath  # noqa: N813
+    import OpenEXR  # noqa: N813
+
+    f = OpenEXR.InputFile(str(path))
+    try:
+        hdr = f.header()
+        names = list(hdr["channels"].keys())
+        parts = [(str(hdr.get("name", "") or ""), names)]
+        pi, layer, comps = choose_beauty(parts)
+        dw = _box(hdr["dataWindow"])
+        w, h = dw[2] - dw[0] + 1, dw[3] - dw[1] + 1
+        ft = Imath.PixelType(Imath.PixelType.FLOAT)
+        planes = [np.frombuffer(f.channel(comps[c], ft), dtype=np.float32).reshape(h, w) for c in "RGB"]
+        ptype = hdr["channels"][comps["R"]].type
+        pixel_type = "half" if "HALF" in str(ptype) else ("float" if "FLOAT" in str(ptype) else str(ptype))
+    finally:
+        f.close()
+    return np.stack(planes, axis=-1), dict(hdr), _describe(parts, pi, layer, comps), pixel_type
+
+
+def _read_new(path: Path):
+    """Any EXR the bindings can open, including multipart: reads everything, keeps the beauty."""
+    import OpenEXR  # noqa: N813
+
+    with OpenEXR.File(str(path), separate_channels=True) as f:
+        nparts = len(f.parts) if hasattr(f, "parts") else 1
+        headers = [dict(f.header(i)) for i in range(nparts)]
+        chans = [f.channels(i) for i in range(nparts)]
+        parts = [(str(headers[i].get("name", "") or ""), list(chans[i].keys())) for i in range(nparts)]
+        pi, layer, comps = choose_beauty(parts)
+
+        def px(name):
+            ch = chans[pi][name]
+            return np.asarray(ch.pixels if hasattr(ch, "pixels") else ch)
+
+        planes = [px(comps[c]) for c in "RGB"]
+        pixel_type = {"float16": "half", "float32": "float", "uint32": "uint"}.get(str(planes[0].dtype), "")
+        rgb = np.stack(planes, axis=-1).astype(np.float32)
+    return rgb, headers[pi], _describe(parts, pi, layer, comps), pixel_type
 
 
 def read_exr_openexr(path: Path) -> Tuple[np.ndarray, ExrInfo]:
     import OpenEXR  # noqa: N813
 
-    with OpenEXR.File(str(path)) as f:
-        hdr = dict(f.header())
-        chans = f.channels()
-        rgb, chan_label = _pick_rgb(chans)
-        pixel_type = str(rgb.dtype)
-        rgb = rgb.astype(np.float32)
-        names = ", ".join(chans.keys())
+    rgb = None
+    if hasattr(OpenEXR, "InputFile"):
+        try:
+            rgb, hdr, chan_label, pixel_type = _read_legacy(path)
+        except Exception:  # noqa: BLE001  (multipart, odd types: use the full reader below)
+            rgb = None
+    if rgb is None:
+        rgb, hdr, chan_label, pixel_type = _read_new(path)
+    rgb = rgb.astype(np.float32, copy=False)
 
     dw = _box(hdr.get("dataWindow"))
     disp = _box(hdr.get("displayWindow")) or dw
@@ -151,8 +245,8 @@ def read_exr_openexr(path: Path) -> Tuple[np.ndarray, ExrInfo]:
         path=path,
         width=width,
         height=height,
-        channels=f"{names}  (using {chan_label})",
-        pixel_type={"float16": "half", "float32": "float", "uint32": "uint"}.get(pixel_type, pixel_type),
+        channels=chan_label,
+        pixel_type=pixel_type,
         compression=str(hdr.get("compression", "")).split(".")[-1].replace("_COMPRESSION", ""),
         fps=_fps(hdr.get("framesPerSecond")),
         timecode=_timecode(hdr.get("timeCode")),
@@ -204,7 +298,15 @@ def read_exr(path) -> Tuple[np.ndarray, ExrInfo]:
         import OpenEXR  # noqa: F401,N813
     except ImportError:
         return read_exr_ffmpeg(path)
-    return read_exr_openexr(path)
+    try:
+        return read_exr_openexr(path)
+    except Exception as err:  # noqa: BLE001
+        try:
+            rgb, info = read_exr_ffmpeg(path)
+        except Exception:  # noqa: BLE001
+            raise ValueError(f"Could not read {path.name}: {err}") from err
+        info.notes.append(f"OpenEXR could not read it ({err}); decoded with ffmpeg instead.")
+        return rgb, info
 
 
 def write_exr(path, rgb: np.ndarray) -> None:
@@ -228,3 +330,57 @@ def write_exr(path, rgb: np.ndarray) -> None:
     )
     if run.returncode != 0:
         raise RuntimeError(run.stderr.decode(errors="replace"))
+
+
+def write_cg_test_files(folder) -> Dict[str, Tuple[Path, np.ndarray]]:
+    """Write multichannel/multipart EXRs like CG renders produce (self-test and unit tests).
+
+    Returns {label: (path, expected beauty RGB)}. Needs the OpenEXR bindings.
+    """
+    import OpenEXR  # noqa: N813
+
+    folder = Path(folder)
+    h, w = 24, 33
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    beauty = np.stack([xx / w * 4, yy / h, np.full_like(xx, 0.18)], axis=-1)
+    other = np.stack([np.full_like(xx, 0.9), np.full_like(xx, 0.1), np.full_like(xx, 0.5)], axis=-1)
+    alpha = np.ones_like(xx)
+
+    def hdr():
+        return {"compression": OpenEXR.ZIP_COMPRESSION, "type": OpenEXR.scanlineimage}
+
+    def rgba(prefix, img, a=True):
+        d = {f"{prefix}R": img[..., 0].astype(np.float16), f"{prefix}G": img[..., 1].astype(np.float16),
+             f"{prefix}B": img[..., 2].astype(np.float16)}
+        if a:
+            d[f"{prefix}A"] = alpha.astype(np.float16)
+        return d
+
+    expected = beauty.astype(np.float16).astype(np.float32)
+    out: Dict[str, Tuple[Path, np.ndarray]] = {}
+
+    # Arnold/Redshift style: plain RGBA plus AOV layers, a float Z and cryptomatte-like channels
+    chans = {**rgba("", beauty), **rgba("diffuse.", other, False), **rgba("specular.", other, False),
+             "Z": (yy * 10).astype(np.float32), "N.X": xx.astype(np.float32),
+             "crypto00.R": xx.astype(np.float32), "crypto00.G": yy.astype(np.float32)}
+    p = folder / "cg_aovs.exr"
+    with OpenEXR.File(hdr(), chans) as f:
+        f.write(str(p))
+    out["AOVs + Z + crypto"] = (p, expected)
+
+    # Blender style: no unprefixed channels
+    chans = {**rgba("ViewLayer.Combined.", beauty), **rgba("ViewLayer.DiffCol.", other, False),
+             "ViewLayer.Depth.Z": (yy * 10).astype(np.float32)}
+    p = folder / "cg_blender.exr"
+    with OpenEXR.File(hdr(), chans) as f:
+        f.write(str(p))
+    out["Blender ViewLayer.Combined"] = (p, expected)
+
+    # Multipart with the beauty in the second part
+    parts = [OpenEXR.Part(hdr(), rgba("", other, False), "diffuse"),
+             OpenEXR.Part(hdr(), rgba("", beauty), "beauty")]
+    p = folder / "cg_multipart.exr"
+    with OpenEXR.File(parts) as f:
+        f.write(str(p))
+    out["multipart, beauty in part 2"] = (p, expected)
+    return out

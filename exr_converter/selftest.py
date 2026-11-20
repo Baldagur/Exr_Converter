@@ -89,6 +89,16 @@ def run(folder: str = "") -> int:
             except FileExistsError:
                 pass
 
+    try:
+        from .core.exr_io import write_cg_test_files
+
+        for label, (path, expected) in write_cg_test_files(out).items():
+            got, cg_info = read_exr(path)
+            diff = float(np.abs(got - expected).max())
+            check(diff < 1e-3 and cg_info.reader == "OpenEXR", f"CG EXR {label}: {cg_info.channels}")
+    except ImportError:
+        print("  (CG multichannel test skipped: no OpenEXR bindings)")
+
     seq = detect_sequence(frames[1])
     check(seq is not None and seq.frames == [1001, 1002, 1003, 1004], "sequence detected")
     for codec in CODECS:
