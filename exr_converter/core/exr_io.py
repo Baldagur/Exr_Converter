@@ -198,11 +198,13 @@ def _read_legacy(path: Path):
         w, h = dw[2] - dw[0] + 1, dw[3] - dw[1] + 1
         ft = Imath.PixelType(Imath.PixelType.FLOAT)
         planes = [np.frombuffer(f.channel(comps[c], ft), dtype=np.float32).reshape(h, w) for c in "RGB"]
+        alpha = (np.frombuffer(f.channel(comps["A"], ft), dtype=np.float32).reshape(h, w).copy()
+                 if "A" in comps else None)
         ptype = hdr["channels"][comps["R"]].type
         pixel_type = "half" if "HALF" in str(ptype) else ("float" if "FLOAT" in str(ptype) else str(ptype))
     finally:
         f.close()
-    return np.stack(planes, axis=-1), dict(hdr), _describe(parts, pi, layer, comps), pixel_type
+    return np.stack(planes, axis=-1), alpha, dict(hdr), _describe(parts, pi, layer, comps), pixel_type
 
 
 def _read_new(path: Path):
@@ -223,20 +225,21 @@ def _read_new(path: Path):
         planes = [px(comps[c]) for c in "RGB"]
         pixel_type = {"float16": "half", "float32": "float", "uint32": "uint"}.get(str(planes[0].dtype), "")
         rgb = np.stack(planes, axis=-1).astype(np.float32)
-    return rgb, headers[pi], _describe(parts, pi, layer, comps), pixel_type
+        alpha = px(comps["A"]).astype(np.float32) if "A" in comps else None
+    return rgb, alpha, headers[pi], _describe(parts, pi, layer, comps), pixel_type
 
 
-def read_exr_openexr(path: Path) -> Tuple[np.ndarray, ExrInfo]:
+def read_exr_openexr(path: Path) -> Tuple[np.ndarray, Optional[np.ndarray], ExrInfo]:
     import OpenEXR  # noqa: N813
 
     rgb = None
     if hasattr(OpenEXR, "InputFile"):
         try:
-            rgb, hdr, chan_label, pixel_type = _read_legacy(path)
+            rgb, alpha, hdr, chan_label, pixel_type = _read_legacy(path)
         except Exception:  # noqa: BLE001  (multipart, odd types: use the full reader below)
             rgb = None
     if rgb is None:
-        rgb, hdr, chan_label, pixel_type = _read_new(path)
+        rgb, alpha, hdr, chan_label, pixel_type = _read_new(path)
     rgb = rgb.astype(np.float32, copy=False)
 
     dw = _box(hdr.get("dataWindow"))
@@ -259,43 +262,55 @@ def read_exr_openexr(path: Path) -> Tuple[np.ndarray, ExrInfo]:
         reader="OpenEXR",
     )
     if dw is not None and dw != disp:
-        canvas = np.zeros((height, width, 3), np.float32)
+        rgb, alpha = _to_display_window(rgb, alpha, dw, disp, width, height)
+        info.notes.append("Data window differs from display window; output uses the display window.")
+    return rgb, alpha, info
+
+
+def _to_display_window(rgb, alpha, dw, disp, width, height):
+    def place(img):
+        canvas = np.zeros((height, width) + img.shape[2:], np.float32)
         x0, y0 = dw[0] - disp[0], dw[1] - disp[1]
         sx0, sy0 = max(0, -x0), max(0, -y0)
         dx0, dy0 = max(0, x0), max(0, y0)
-        w = min(rgb.shape[1] - sx0, width - dx0)
-        h = min(rgb.shape[0] - sy0, height - dy0)
+        w = min(img.shape[1] - sx0, width - dx0)
+        h = min(img.shape[0] - sy0, height - dy0)
         if w > 0 and h > 0:
-            canvas[dy0 : dy0 + h, dx0 : dx0 + w] = rgb[sy0 : sy0 + h, sx0 : sx0 + w]
-        rgb = canvas
-        info.notes.append("Data window differs from display window; output uses the display window.")
-    return rgb, info
+            canvas[dy0 : dy0 + h, dx0 : dx0 + w] = img[sy0 : sy0 + h, sx0 : sx0 + w]
+        return canvas
+
+    return place(rgb), (place(alpha) if alpha is not None else None)
 
 
 _STREAM_RE = re.compile(r"Video: exr.*?, (\w+)(?:\([^)]*\))?, (\d+)x(\d+)")
 
 
-def read_exr_ffmpeg(path: Path) -> Tuple[np.ndarray, ExrInfo]:
+def read_exr_ffmpeg(path: Path) -> Tuple[np.ndarray, Optional[np.ndarray], ExrInfo]:
     ff = ffmpeg_path()
     probe = subprocess.run([ff, "-hide_banner", "-i", str(path)], capture_output=True, text=True)
     m = _STREAM_RE.search(probe.stderr)
     if not m:
         raise ValueError(f"Could not read EXR: {path}\n{probe.stderr[-400:]}")
     w, h = int(m.group(2)), int(m.group(3))
+    has_alpha = m.group(1).startswith("gbra")
+    fmt = "gbrapf32le" if has_alpha else "gbrpf32le"
     run = subprocess.run(
-        [ff, "-v", "error", "-i", str(path), "-f", "rawvideo", "-pix_fmt", "gbrpf32le", "-"],
+        [ff, "-v", "error", "-i", str(path), "-f", "rawvideo", "-pix_fmt", fmt, "-"],
         capture_output=True,
     )
     if run.returncode != 0:
         raise ValueError(run.stderr.decode(errors="replace")[-400:])
-    planes = np.frombuffer(run.stdout, dtype="<f4").reshape(3, h, w)
+    planes = np.frombuffer(run.stdout, dtype="<f4").reshape(4 if has_alpha else 3, h, w)
     rgb = np.stack([planes[2], planes[0], planes[1]], axis=-1).astype(np.float32)
-    info = ExrInfo(path=path, width=w, height=h, channels="RGB", pixel_type=m.group(1), reader="ffmpeg")
+    alpha = planes[3].astype(np.float32) if has_alpha else None
+    info = ExrInfo(path=path, width=w, height=h, channels="RGBA" if has_alpha else "RGB",
+                   pixel_type=m.group(1), reader="ffmpeg")
     info.notes.append("Read with ffmpeg: header details (fps, timecode) unavailable.")
-    return rgb, info
+    return rgb, alpha, info
 
 
-def read_exr(path) -> Tuple[np.ndarray, ExrInfo]:
+def read_exr_rgba(path) -> Tuple[np.ndarray, Optional[np.ndarray], ExrInfo]:
+    """RGB float32 (H, W, 3), alpha float32 (H, W) or None, and header info."""
     path = Path(path)
     try:
         import OpenEXR  # noqa: F401,N813
@@ -305,29 +320,41 @@ def read_exr(path) -> Tuple[np.ndarray, ExrInfo]:
         return read_exr_openexr(path)
     except Exception as err:  # noqa: BLE001
         try:
-            rgb, info = read_exr_ffmpeg(path)
+            rgb, alpha, info = read_exr_ffmpeg(path)
         except Exception:  # noqa: BLE001
             raise ValueError(f"Could not read {path.name}: {err}") from err
         info.notes.append(f"OpenEXR could not read it ({err}); decoded with ffmpeg instead.")
-        return rgb, info
+        return rgb, alpha, info
 
 
-def write_exr(path, rgb: np.ndarray) -> None:
-    """Write a half-float RGB EXR (used by the self-test)."""
+def read_exr(path) -> Tuple[np.ndarray, ExrInfo]:
+    rgb, _alpha, info = read_exr_rgba(path)
+    return rgb, info
+
+
+def write_exr(path, rgb: np.ndarray, alpha: Optional[np.ndarray] = None) -> None:
+    """Write a half-float RGB(A) EXR (used by the self-test)."""
     path = Path(path)
     try:
         import OpenEXR  # noqa: N813
 
         header = {"compression": OpenEXR.ZIP_COMPRESSION, "type": OpenEXR.scanlineimage}
-        with OpenEXR.File(header, {"RGB": rgb.astype(np.float16)}) as f:
+        if alpha is not None:
+            chans = {c: rgb[..., i].astype(np.float16) for i, c in enumerate("RGB")}
+            chans["A"] = alpha.astype(np.float16)
+        else:
+            chans = {"RGB": rgb.astype(np.float16)}
+        with OpenEXR.File(header, chans) as f:
             f.write(str(path))
         return
     except ImportError:
         pass
     h, w = rgb.shape[:2]
-    planes = np.stack([rgb[..., 1], rgb[..., 2], rgb[..., 0]]).astype("<f4")
+    planes = [rgb[..., 1], rgb[..., 2], rgb[..., 0]] + ([alpha] if alpha is not None else [])
+    planes = np.stack(planes).astype("<f4")
+    pix = "gbrapf32le" if alpha is not None else "gbrpf32le"
     run = subprocess.run(
-        [ffmpeg_path(), "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "gbrpf32le", "-s", f"{w}x{h}",
+        [ffmpeg_path(), "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", pix, "-s", f"{w}x{h}",
          "-i", "-", "-c:v", "exr", "-compression", "zip1", "-format", "half", str(path)],
         input=planes.tobytes(), capture_output=True,
     )

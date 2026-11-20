@@ -25,10 +25,14 @@ def clip_masks(display: np.ndarray, eps: float = 0.5 / 255) -> Tuple[np.ndarray,
     return high, low
 
 
-def overlay(img8: np.ndarray, display: np.ndarray, src_bad: Optional[np.ndarray] = None) -> np.ndarray:
-    """Tint clipped pixels: red = white clip, blue = black clip, magenta = bad source values."""
+def overlay(img8: np.ndarray, display: np.ndarray, src_bad: Optional[np.ndarray] = None,
+            transparent: Optional[np.ndarray] = None) -> np.ndarray:
+    """Tint clipped pixels: red = white clip, blue = black clip, magenta = bad source values.
+    `transparent` (alpha == 0) pixels are not marked as black clip."""
     out = img8.astype(np.float32)
     high, low = clip_masks(display)
+    if transparent is not None:
+        low = low & ~transparent
     for mask, col in ((high, CLIP_HIGH), (low, CLIP_LOW), (src_bad, SRC_BAD)):
         if mask is not None and mask.any():
             out[mask] = out[mask] * 0.35 + col * 0.65
@@ -67,3 +71,15 @@ def preview_encode(display: np.ndarray, fmt: str, jpeg_quality: int = 95) -> np.
         with Image.open(buf) as im:
             q8 = np.asarray(im.convert("RGB"))
     return q8.astype(np.float32) / 255.0
+
+
+def alpha_view(alpha: np.ndarray) -> np.ndarray:
+    """Alpha as a grey uint8 image."""
+    a8 = quantize(alpha, 8)
+    return np.repeat(a8[..., None], 3, axis=-1)
+
+
+def preview_alpha(alpha: np.ndarray, fmt: str) -> np.ndarray:
+    """Alpha as it will be stored in a PNG of this format (float 0..1)."""
+    bits = 16 if fmt == "png16" else 8
+    return quantize(alpha, bits).astype(np.float32) / ((1 << bits) - 1)

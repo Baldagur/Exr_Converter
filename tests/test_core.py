@@ -147,9 +147,47 @@ def test_reads_cg_multichannel_files(tmp_path):
     from exr_converter.core import exr_io
     files = exr_io.write_cg_test_files(tmp_path)
     for label, (path, expected) in files.items():
-        rgb, info = exr_io.read_exr(path)
+        rgb, alpha, info = exr_io.read_exr_rgba(path)
         assert info.reader == "OpenEXR", (label, info.notes)
+        assert alpha is not None and np.allclose(alpha, 1.0), label
         assert np.allclose(rgb, expected, atol=1e-3), label
         # the full reader must work too, not only the fast single-part path
         rgb2 = exr_io._read_new(path)[0]
         assert np.allclose(rgb2, expected, atol=1e-3), label
+
+
+@pytest.mark.parametrize("bits", [8, 16])
+def test_png_rgba_roundtrip(tmp_path, bits):
+    from exr_converter.core.output import read_image_rgba, write_still
+    rng = np.random.default_rng(2)
+    disp = rng.random((6, 5, 3)).astype(np.float32)
+    alpha = rng.random((6, 5)).astype(np.float32)
+    p = tmp_path / "a.png"
+    write_still(p, disp, f"png{bits}", "rec709", alpha=alpha)
+    rgb, a, b = read_image_rgba(p)
+    top = (1 << bits) - 1
+    assert b == bits and a is not None
+    assert np.abs(rgb - disp).max() <= 0.5 / top + 1e-6
+    assert np.abs(a - alpha).max() <= 0.5 / top + 1e-6
+    # JPEG ignores alpha
+    write_still(tmp_path / "a.jpg", disp, "jpeg", "rec709", alpha=alpha)
+    assert read_image_rgba(tmp_path / "a.jpg")[1] is None
+
+
+def test_unpremultiply():
+    from exr_converter.core.color import unpremultiply
+    rgb = np.array([[[0.25, 0.1, 0.0], [0.0, 0.0, 0.0], [0.5, 0.5, 0.5]]], np.float32)
+    a = np.array([[0.5, 0.0, 1.0]], np.float32)
+    out = unpremultiply(rgb, a)
+    assert np.allclose(out, [[[0.5, 0.2, 0.0], [0, 0, 0], [0.5, 0.5, 0.5]]])
+
+
+def test_exr_alpha_read(tmp_path):
+    from exr_converter.core.exr_io import read_exr_rgba, write_exr
+    rgb = np.full((4, 6, 3), 0.18, np.float32)
+    a = np.linspace(0, 1, 24, dtype=np.float32).reshape(4, 6)
+    write_exr(tmp_path / "a.exr", rgb * a[..., None], a)
+    got, alpha, info = read_exr_rgba(tmp_path / "a.exr")
+    assert alpha is not None and np.abs(alpha - a).max() < 1e-3
+    write_exr(tmp_path / "b.exr", rgb)
+    assert read_exr_rgba(tmp_path / "b.exr")[1] is None

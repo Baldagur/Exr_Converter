@@ -24,6 +24,10 @@ LogC3 EI 800 AWG3 in → Rec.709 gamma 2.4, full range, 33 point.
 - Never overwrites: an existing name gets `_2`, `_3`…, and files are created exclusively, so a
   file that appears at the last moment is never written over.
 - Open several EXRs at once to export them all with the same settings.
+- **Alpha (PNG):** tick "Write alpha" to get an RGBA PNG (8 or 16-bit, straight alpha). CG renders
+  are premultiplied, so the RGB is unpremultiplied before the look (like Nuke's Unpremult →
+  colour transform → Write); untick "Unpremultiply" for EXRs that are already straight. JPEG and
+  QuickTime have no alpha. Multichannel/multipart renders: the beauty's A is used.
 
 ## QuickTime
 - Open any frame of a sequence (`shot.1001.exr`, `shot_1001.exr`); the whole sequence is found.
@@ -45,7 +49,8 @@ LogC3 EI 800 AWG3 in → Rec.709 gamma 2.4, full range, 33 point.
 - **A** = the original EXR shown live through a look (pick the export look or the other one).
 - **B** = the result: a preview of what will be written, or the actual file read back after export
   (or load any PNG/JPEG with "Load a result file as B").
-- Modes: wipe (drag the line), A only, B only, difference ×10 with max/mean error in 8-bit codes.
+- Modes: wipe (drag the line), A only, B only, difference ×10 with max/mean error in 8-bit codes,
+  alpha. With PNG alpha on, A and B are shown over black so they still compare 1:1.
 - Clipping overlay: red = a channel hits display white, blue = hits black, magenta = negative or
   invalid values in the source EXR. Percentages are shown under the viewer controls.
 - Exposure on A (±6 stops) to see how much highlight detail is left before the roll-off.

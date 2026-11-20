@@ -99,6 +99,31 @@ def run(folder: str = "") -> int:
     except ImportError:
         print("  (CG multichannel test skipped: no OpenEXR bindings)")
 
+    # Alpha: premultiplied CG-style EXR -> PNG with straight alpha
+    from .core.color import unpremultiply
+    from .core.exr_io import read_exr_rgba, write_exr
+    from .core.output import read_image_rgba
+
+    h, w = 64, 96
+    a = np.clip(np.linspace(-0.2, 1.2, w, dtype=np.float32), 0, 1)[None, :].repeat(h, 0)
+    straight = np.zeros((h, w, 3), np.float32)
+    straight[:] = [0.6, 0.18, 0.05]
+    alpha_exr = out / "alpha_test.exr"
+    write_exr(alpha_exr, straight * a[..., None], a)
+    rgb_a, al, _ = read_exr_rgba(alpha_exr)
+    check(al is not None and float(np.abs(al - a).max()) < 1e-3, "EXR alpha read")
+    for look in LOOKS:
+        disp = engine.convert(unpremultiply(rgb_a, al), look, "rec709")
+        pth = out / f"alpha_{look}.png"
+        write_still(pth, disp, "png16", "rec709", alpha=al)
+        back, back_a, bits = read_image_rgba(pth)
+        ref = engine.convert(straight, look, "rec709")  # colour must not darken toward the edges
+        visible = a > 0.05
+        err_rgb = float(np.abs(back - ref)[visible].max())
+        err_a = float(np.abs(back_a - a).max())
+        check(back_a is not None and err_a < 1e-3 and err_rgb < 0.004,
+              f"PNG alpha {look}: straight colour err {err_rgb:.5f}, alpha err {err_a:.5f}")
+
     seq = detect_sequence(frames[1])
     check(seq is not None and seq.frames == [1001, 1002, 1003, 1004], "sequence detected")
     for codec in CODECS:
@@ -114,13 +139,15 @@ def run(folder: str = "") -> int:
     if os.environ.get("EXRCONV_SELFTEST_NOGUI"):
         print("  (GUI test skipped)")
     else:
-        _gui_test(out, frames, engine, check)
+        _gui_test(out, frames, engine, check, alpha_exr)
 
     print("\nSELFTEST " + ("PASSED" if not failures else f"FAILED ({len(failures)})"))
     return 0 if not failures else 1
 
 
-def _gui_test(out, frames, engine, check):
+def _gui_test(out, frames, engine, check, alpha_exr):
+    from .core.output import read_image_rgba
+
     try:
         from PySide6.QtWidgets import QApplication
 
@@ -146,6 +173,16 @@ def _gui_test(out, frames, engine, check):
         new = [p.name for p in set(out.iterdir()) - before]
         check(any("_sRGB." in n and n.endswith(".png") for n in new), f"GUI still export: {new}")
         check(win.seq is not None and win.btn_movie.isEnabled(), "GUI sees the sequence")
+        win.open_files([alpha_exr])
+        app.processEvents()
+        win.chk_alpha.setChecked(True)
+        win.cmb_mode.setCurrentIndex(win.cmb_mode.findData("alpha"))
+        app.processEvents()
+        before = set(out.iterdir())
+        win.export_stills()
+        new = [p for p in set(out.iterdir()) - before if p.suffix == ".png"]
+        has_alpha = bool(new) and read_image_rgba(new[0])[1] is not None
+        check(has_alpha, f"GUI PNG export with alpha: {[p.name for p in new]}")
         win.close()
         win.deleteLater()
         app.processEvents()

@@ -316,3 +316,10 @@ def sanitize(rgb: np.ndarray) -> np.ndarray:
 def source_problem_mask(rgb: np.ndarray) -> np.ndarray:
     """Pixels that are NaN/inf or negative (outside the ACEScg gamut) in any channel."""
     return (~np.isfinite(rgb)).any(axis=-1) | (np.nan_to_num(rgb) < 0).any(axis=-1)
+
+
+def unpremultiply(rgb: np.ndarray, alpha: np.ndarray, threshold: float = 1e-6) -> np.ndarray:
+    """Divide premultiplied RGB by alpha (like Nuke's Unpremult); alpha 0 pixels are left alone."""
+    a = alpha[..., None].astype(np.float32)
+    safe = np.where(a > threshold, a, 1.0)
+    return np.where(a > threshold, rgb / safe, rgb).astype(np.float32)

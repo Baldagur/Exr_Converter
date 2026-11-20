@@ -17,10 +17,12 @@ from PySide6.QtWidgets import (
 
 from .. import APP_NAME, __version__
 from ..core import compare
-from ..core.color import LOOK_SUFFIX, LOOKS, OUTPUT_SUFFIX, OUTPUTS, ColorEngine, sanitize, source_problem_mask
-from ..core.exr_io import ExrInfo, read_exr
+from ..core.color import (
+    LOOK_SUFFIX, LOOKS, OUTPUT_SUFFIX, OUTPUTS, ColorEngine, sanitize, source_problem_mask, unpremultiply,
+)
+from ..core.exr_io import ExrInfo, read_exr_rgba
 from ..core.movie import CODECS, FPS_CHOICES, MovieCancelled, MovieJob, encode_movie, fps_label, fps_rational, movie_path
-from ..core.output import FORMATS, output_path, read_image, write_still
+from ..core.output import FORMATS, output_path, read_image_rgba, write_still
 from ..core.sequence import Sequence, detect_sequence
 from .viewer import ImageViewer
 
@@ -29,6 +31,7 @@ VIEW_MODES = {
     "a": "A only (original, live)",
     "b": "B only (result)",
     "diff": "Difference ×10",
+    "alpha": "Alpha",
 }
 
 
@@ -64,6 +67,9 @@ class MainWindow(QMainWindow):
         self.files: List[Path] = []
         self.src: Optional[np.ndarray] = None
         self.src_bad: Optional[np.ndarray] = None
+        self.src_alpha: Optional[np.ndarray] = None
+        self.b_alpha: Optional[np.ndarray] = None  # alpha as stored in the result (PNG), or None
+        self.b_raw: Optional[np.ndarray] = None    # result RGB as stored (b_img is shown over black)
         self.info: Optional[ExrInfo] = None
         self.seq: Optional[Sequence] = None
         self.a_disp: Optional[np.ndarray] = None
@@ -153,6 +159,13 @@ class MainWindow(QMainWindow):
         self.btn_still.clicked.connect(self.export_stills)
         fs.addRow("Format", self.cmb_fmt)
         fs.addRow("JPEG quality", self.spn_quality)
+        self.chk_alpha = QCheckBox("Write alpha (PNG only)")
+        self.chk_unpremult = QCheckBox("Unpremultiply before the look (CG renders)")
+        self.chk_unpremult.setChecked(True)
+        self.chk_unpremult.setToolTip("EXR renders are premultiplied. PNG stores straight alpha, so the RGB is\n"
+                                      "divided by alpha before the colour transform, like Nuke's Unpremult.")
+        fs.addRow(self.chk_alpha)
+        fs.addRow(self.chk_unpremult)
         fs.addRow(self.btn_still)
         col.addWidget(g_still)
 
@@ -261,6 +274,8 @@ class MainWindow(QMainWindow):
         for w in (self.cmb_look, self.cmb_out, self.cmb_fmt):
             w.currentIndexChanged.connect(self._on_export_settings_changed)
         self.spn_quality.valueChanged.connect(self._on_export_settings_changed)
+        self.chk_alpha.toggled.connect(self._on_alpha_settings_changed)
+        self.chk_unpremult.toggled.connect(self._on_alpha_settings_changed)
         self.cmb_alook.currentIndexChanged.connect(self.refresh_a)
         self.cmb_mode.currentIndexChanged.connect(self.compose)
         self.chk_clip.toggled.connect(self.compose)
@@ -285,6 +300,8 @@ class MainWindow(QMainWindow):
                 if combo.currentData() == "aces":
                     combo.setCurrentIndex(combo.findData("k1s1"))
         self.chk_lookname.setChecked(s.value("lookname", False, type=bool))
+        self.chk_alpha.setChecked(s.value("alpha", False, type=bool))
+        self.chk_unpremult.setChecked(s.value("unpremult", True, type=bool))
         self.spn_quality.setValue(int(s.value("quality", 95)))
 
     def _save_settings(self):
@@ -294,6 +311,8 @@ class MainWindow(QMainWindow):
         s.setValue("format", self.cmb_fmt.currentData())
         s.setValue("codec", self.cmb_codec.currentData())
         s.setValue("lookname", self.chk_lookname.isChecked())
+        s.setValue("alpha", self.chk_alpha.isChecked())
+        s.setValue("unpremult", self.chk_unpremult.isChecked())
         s.setValue("quality", self.spn_quality.value())
 
     def closeEvent(self, e):  # noqa: N802
@@ -326,6 +345,20 @@ class MainWindow(QMainWindow):
     def a_look(self) -> str:
         return self.cmb_alook.currentData() or self.look
 
+    @property
+    def alpha_on(self) -> bool:
+        """Alpha is written (and shown) only for PNG, when asked for and the EXR has one."""
+        return self.fmt in ("png16", "png8") and self.chk_alpha.isChecked() and self.src_alpha is not None
+
+    def export_display(self, rgb: np.ndarray, alpha: Optional[np.ndarray], look: str,
+                       gain: float = 1.0) -> np.ndarray:
+        """Display RGB for export. With alpha on: unpremultiplied first (straight alpha)."""
+        if alpha is not None and self.chk_unpremult.isChecked():
+            rgb = unpremultiply(rgb, alpha)
+        if gain != 1.0:
+            rgb = rgb * gain
+        return self.engine.convert(rgb, look, self.output)
+
     def suffix(self) -> str:
         s = OUTPUT_SUFFIX[self.output]
         return f"{LOOK_SUFFIX[self.look]}_{s}" if self.chk_lookname.isChecked() else s
@@ -342,6 +375,9 @@ class MainWindow(QMainWindow):
         self.btn_movie.setEnabled(self.seq is not None and not busy)
         self.btn_cancel.setEnabled(busy)
         self.spn_quality.setEnabled(self.fmt == "jpeg")
+        is_png = self.fmt in ("png16", "png8")
+        self.chk_alpha.setEnabled(is_png)
+        self.chk_unpremult.setEnabled(is_png and self.chk_alpha.isChecked())
         self.ed_outdir.setEnabled(self.chk_outdir.isChecked())
         self.btn_outdir.setEnabled(self.chk_outdir.isChecked())
 
@@ -388,6 +424,7 @@ class MainWindow(QMainWindow):
         self.files = []
         self.file_list.clear()
         self.src = self.info = self.seq = self.a_disp = self.b_img = None
+        self.src_alpha = self.b_alpha = self.b_raw = None
         self.lbl_info.setText("No file loaded.")
         self.lbl_seq.setText("Open one frame of a sequence.")
         self.viewer.clear()
@@ -400,7 +437,7 @@ class MainWindow(QMainWindow):
     def load_source(self, path: Path):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            rgb, info = read_exr(path)
+            rgb, alpha, info = read_exr_rgba(path)
         except Exception as err:  # noqa: BLE001
             self._error("Could not read EXR", err)
             return
@@ -408,11 +445,13 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
         self.src_bad = source_problem_mask(rgb)
         self.src = sanitize(rgb)
+        self.src_alpha = np.clip(np.nan_to_num(alpha), 0.0, 1.0) if alpha is not None else None
         self.info = info
         lines = [
             f"<b>{path.name}</b>",
             f"{info.width} × {info.height} · {info.pixel_type} · {info.compression or '—'}",
             f"Channels: {info.channels}",
+            "Alpha: yes" if alpha is not None else "Alpha: none (PNG alpha option does nothing)",
             f"Primaries: {info.chroma_label}",
             f"FPS: {info.fps:g}" if info.fps else "FPS: not in header",
             f"Timecode: {info.timecode}" if info.timecode else "Timecode: not in header",
@@ -456,13 +495,26 @@ class MainWindow(QMainWindow):
         self.b_from_file = False
         self.refresh_b_preview()
 
+    def _on_alpha_settings_changed(self, *_):
+        self._update_enabled()
+        if self.src is None:
+            return
+        self.b_from_file = False
+        self.refresh_a(compose=False)
+        self.refresh_b_preview()
+
     def refresh_a(self, *_, compose: bool = True):
         if self.src is None:
             return
         try:
             gain = 2.0 ** (self.sld_exp.value() / 10.0)
-            src = self.src * gain if gain != 1.0 else self.src
-            self.a_disp = self.engine.convert(src, self.a_look, self.output)
+            if self.alpha_on:
+                # Same path as the export, shown over black so A and B line up.
+                disp = self.export_display(self.src, self.src_alpha, self.a_look, gain)
+                self.a_disp = disp * self.src_alpha[..., None]
+            else:
+                src = self.src * gain if gain != 1.0 else self.src
+                self.a_disp = self.engine.convert(src, self.a_look, self.output)
         except Exception as err:  # noqa: BLE001
             self._error("Colour conversion failed", err)
             return
@@ -473,13 +525,21 @@ class MainWindow(QMainWindow):
         if self.src is None:
             return
         try:
-            disp = self.engine.convert(self.src, self.look, self.output)
-            self.b_img = compare.preview_encode(disp, self.fmt, self.spn_quality.value())
+            if self.alpha_on:
+                disp = self.export_display(self.src, self.src_alpha, self.look)
+                self.b_raw = compare.preview_encode(disp, self.fmt, self.spn_quality.value())
+                self.b_alpha = compare.preview_alpha(self.src_alpha, self.fmt)
+                self.b_img = self.b_raw * self.b_alpha[..., None]
+            else:
+                disp = self.engine.convert(self.src, self.look, self.output)
+                self.b_raw = self.b_img = compare.preview_encode(disp, self.fmt, self.spn_quality.value())
+                self.b_alpha = None
         except Exception as err:  # noqa: BLE001
             self._error("Colour conversion failed", err)
             return
         self.b_bits = 16 if self.fmt == "png16" else 8
-        self.b_label = f"B: preview of {FORMATS[self.fmt][0]} (not saved yet)"
+        extra = " + alpha, shown over black" if self.alpha_on else ""
+        self.b_label = f"B: preview of {FORMATS[self.fmt][0]}{extra} (not saved yet)"
         self.compose()
 
     def load_b_dialog(self):
@@ -490,7 +550,7 @@ class MainWindow(QMainWindow):
 
     def load_b(self, path: Path):
         try:
-            img, bits = read_image(path)
+            img, alpha, bits = read_image_rgba(path)
         except Exception as err:  # noqa: BLE001
             self._error("Could not read image", err)
             return
@@ -498,8 +558,10 @@ class MainWindow(QMainWindow):
             self._error("Size mismatch", f"{path.name} is {img.shape[1]}×{img.shape[0]}, "
                                          f"the EXR is {self.src.shape[1]}×{self.src.shape[0]}.")
             return
-        self.b_img, self.b_bits, self.b_from_file = img, bits, True
-        self.b_label = f"B: {path.name} ({bits}-bit, read from disk)"
+        self.b_raw, self.b_alpha, self.b_bits, self.b_from_file = img, alpha, bits, True
+        self.b_img = img * alpha[..., None] if alpha is not None else img
+        extra = " + alpha, shown over black" if alpha is not None else ""
+        self.b_label = f"B: {path.name} ({bits}-bit{extra}, read from disk)"
         self.compose()
 
     def compose(self, *_):
@@ -510,16 +572,25 @@ class MainWindow(QMainWindow):
         exp = self.sld_exp.value() / 10.0
         a_label = f"A: original · {LOOKS[self.a_look]}" + (f" · {exp:+.1f} stops" if exp else "")
         a8 = compare.to8(self.a_disp)
+        clear_a = (self.src_alpha <= 0) if self.alpha_on else None
         if show_clip:
-            a8 = compare.overlay(a8, self.a_disp, self.src_bad)
+            a8 = compare.overlay(a8, self.a_disp, self.src_bad, clear_a)
         b8 = None
         if self.b_img is not None:
             b8 = compare.to8(self.b_img)
             if show_clip:
-                b8 = compare.overlay(b8, self.b_img)
+                clear_b = (self.b_alpha <= 0) if self.b_alpha is not None else None
+                b8 = compare.overlay(b8, self.b_img, transparent=clear_b)
 
         stats = [f"A {compare.clip_stats(self.a_disp, self.src_bad)}"]
-        if mode == "diff" and self.b_img is not None:
+        if mode == "alpha":
+            if self.b_alpha is not None:
+                self.viewer.set_view(compare.alpha_view(self.b_alpha), left_label="Alpha of B (as stored in the PNG)")
+            elif self.src_alpha is not None:
+                self.viewer.set_view(compare.alpha_view(self.src_alpha), left_label="Alpha of the EXR (not exported)")
+            else:
+                self.viewer.set_view(np.zeros_like(a8), left_label="No alpha in this EXR")
+        elif mode == "diff" and self.b_img is not None:
             img, mx, mean = compare.difference(self.a_disp, self.b_img)
             self.viewer.set_view(img, left_label="|A − B| × 10")
             stats.append(f"A vs B: max {mx:.2f}, mean {mean:.3f} (8-bit code values)")
@@ -539,13 +610,18 @@ class MainWindow(QMainWindow):
             return
         s = self.src[y, x]
         parts = [f"x {x}  y {y}", f"ACEScg {s[0]:.4f} {s[1]:.4f} {s[2]:.4f}"]
+        if self.src_alpha is not None:
+            parts[-1] += f"  A {self.src_alpha[y, x]:.4f}"
         if self.a_disp is not None:
             a = self.a_disp[y, x]
             parts.append(f"A {a[0]:.4f} {a[1]:.4f} {a[2]:.4f}")
-        if self.b_img is not None:
+        if self.b_raw is not None:
             top = (1 << self.b_bits) - 1
-            b = np.rint(self.b_img[y, x] * top).astype(int)
-            parts.append(f"B {b[0]} {b[1]} {b[2]} /{top}")
+            b = np.rint(self.b_raw[y, x] * top).astype(int)
+            txt = f"B {b[0]} {b[1]} {b[2]}"
+            if self.b_alpha is not None:
+                txt += f" α {int(np.rint(self.b_alpha[y, x] * top))}"
+            parts.append(txt + f" /{top}")
         self.statusBar().showMessage("    ".join(parts))
 
     # ================================================================== export
@@ -569,12 +645,20 @@ class MainWindow(QMainWindow):
                     break
                 try:
                     if p == current and self.src is not None:
-                        rgb = self.src
+                        rgb, alpha = self.src, self.src_alpha
                     else:
-                        rgb = sanitize(read_exr(p)[0])
-                    disp = self.engine.convert(rgb, self.look, self.output)
+                        rgb, alpha, _info = read_exr_rgba(p)
+                        rgb = sanitize(rgb)
+                        alpha = np.clip(np.nan_to_num(alpha), 0.0, 1.0) if alpha is not None else None
+                    write_alpha = (self.fmt in ("png16", "png8") and self.chk_alpha.isChecked()
+                                   and alpha is not None)
+                    if write_alpha:
+                        disp = self.export_display(rgb, alpha, self.look)
+                    else:
+                        disp = self.engine.convert(rgb, self.look, self.output)
                     out = output_path(p, self.suffix(), ext, self.out_dir())
-                    write_still(out, disp, self.fmt, self.output, self.spn_quality.value())
+                    write_still(out, disp, self.fmt, self.output, self.spn_quality.value(),
+                                alpha=alpha if write_alpha else None)
                     written.append(out)
                     if p == current:
                         self.load_b(out)
