@@ -188,6 +188,9 @@ def _read_legacy(path: Path):
     f = OpenEXR.InputFile(str(path))
     try:
         hdr = f.header()
+        if hdr.get("name") or "multipart" in str(hdr.get("type", "")).lower():
+            # Multipart files carry a part name; the classic API only sees part 0.
+            raise ValueError("multipart: use the full reader")
         names = list(hdr["channels"].keys())
         parts = [(str(hdr.get("name", "") or ""), names)]
         pi, layer, comps = choose_beauty(parts)
