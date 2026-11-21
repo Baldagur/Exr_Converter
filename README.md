@@ -4,6 +4,14 @@ Converts ACEScg EXRs (16-bit half) to Rec.709 or sRGB PNG / JPEG, and EXR sequen
 Standalone Linux app: no install, no internet needed. Unpack the folder anywhere and run
 `ExrConverter/ExrConverter` (double-click, or from a terminal). Keep the folder together.
 
+## Opening files
+- **Open EXR(s)…**, drag and drop (files or folders), or **paste a path** in the box under the
+  buttons and press Enter. Ctrl+V anywhere in the window (outside a text field) does the same.
+- Pasted paths can be quoted, `file://` links, use `~` or `$VARS`, a folder (opens its sequence,
+  or all its EXRs), or a sequence pattern like `shot.####.exr`, `shot.%04d.exr`, `shot.@@@@.exr`,
+  with or without a Nuke frame range after it (`shot.####.exr 1001-1100`). One path per line for
+  several files.
+
 ## Looks
 | Look | Chain |
 |---|---|

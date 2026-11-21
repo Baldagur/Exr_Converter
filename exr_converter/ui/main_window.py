@@ -9,6 +9,7 @@ from typing import List, Optional
 
 import numpy as np
 from PySide6.QtCore import QSettings, QThread, QTimer, Qt, Signal
+from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox, QProgressBar,
@@ -22,6 +23,7 @@ from ..core.color import (
 )
 from ..core.exr_io import ExrInfo, read_exr_rgba
 from ..core.movie import CODECS, FPS_CHOICES, MovieCancelled, MovieJob, encode_movie, fps_label, fps_rational, movie_path
+from ..core.paths import resolve_pasted
 from ..core.output import FORMATS, output_path, read_image_rgba, write_still
 from ..core.sequence import Sequence, detect_sequence
 from .viewer import ImageViewer
@@ -106,6 +108,19 @@ class MainWindow(QMainWindow):
         row.addWidget(self.btn_open)
         row.addWidget(self.btn_clear)
         ls.addLayout(row)
+        prow = QHBoxLayout()
+        self.ed_path = QLineEdit()
+        self.ed_path.setPlaceholderText("Paste a path and press Enter")
+        self.ed_path.setToolTip(
+            "A file, a folder, or a sequence pattern like shot.####.exr / shot.%04d.exr\n"
+            "(a Nuke frame range after it is fine). Quotes, file:// links, ~ and $VARS work.\n"
+            "Several paths: one per line. Ctrl+V anywhere in the window does the same.")
+        self.ed_path.returnPressed.connect(self.open_typed_path)
+        self.btn_path = QPushButton("Open")
+        self.btn_path.clicked.connect(self.open_typed_path)
+        prow.addWidget(self.ed_path)
+        prow.addWidget(self.btn_path)
+        ls.addLayout(prow)
         self.file_list = QListWidget()
         self.file_list.setMaximumHeight(90)
         self.file_list.currentRowChanged.connect(self._on_file_selected)
@@ -397,12 +412,41 @@ class MainWindow(QMainWindow):
 
     def dropEvent(self, e):  # noqa: N802
         paths = [Path(u.toLocalFile()) for u in e.mimeData().urls() if u.isLocalFile()]
-        exrs = [p for p in paths if p.suffix.lower() == ".exr"]
         others = [p for p in paths if p.suffix.lower() in (".png", ".jpg", ".jpeg")]
-        if exrs:
-            self.open_files(exrs)
-        elif others and self.src is not None:
+        if others and self.src is not None and len(others) == len(paths):
             self.load_b(others[0])
+        else:
+            self.open_pasted("\n".join(str(p) for p in paths))
+
+    def open_typed_path(self):
+        if self.open_pasted(self.ed_path.text()):
+            self.ed_path.clear()
+
+    def open_pasted(self, text: str) -> bool:
+        """Open whatever EXRs `text` points at. Returns True if something was opened."""
+        files, problems = resolve_pasted(text)
+        if files:
+            self.open_files(files)
+        if problems:
+            msg = "\n".join(problems[:10]) + ("\n…" if len(problems) > 10 else "")
+            if files:
+                self.statusBar().showMessage(problems[0], 10000)
+            else:
+                QMessageBox.warning(self, APP_NAME, msg)
+        return bool(files)
+
+    def keyPressEvent(self, e):  # noqa: N802
+        # Ctrl+V anywhere that isn't a text field: open the path(s) on the clipboard.
+        if e.matches(QKeySequence.Paste):
+            md = QApplication.clipboard().mimeData()
+            if md is not None and md.hasUrls() and any(u.isLocalFile() for u in md.urls()):
+                text = "\n".join(u.toLocalFile() for u in md.urls() if u.isLocalFile())
+            else:
+                text = QApplication.clipboard().text()
+            if text.strip():
+                self.open_pasted(text)
+            return
+        super().keyPressEvent(e)
 
     def open_dialog(self):
         start = self.settings.value("last_dir", str(Path.home()))

@@ -173,6 +173,11 @@ def _gui_test(out, frames, engine, check, alpha_exr):
         new = [p.name for p in set(out.iterdir()) - before]
         check(any("_sRGB." in n and n.endswith(".png") for n in new), f"GUI still export: {new}")
         check(win.seq is not None and win.btn_movie.isEnabled(), "GUI sees the sequence")
+        win.ed_path.setText(f'"{frames[0].parent}/selftest.####.exr" 1001-1004')
+        win.open_typed_path()
+        app.processEvents()
+        check(win.files == [frames[0]] and win.seq is not None and win.ed_path.text() == "",
+              f"GUI pasted path opens the sequence: {[p.name for p in win.files]}")
         win.open_files([alpha_exr])
         app.processEvents()
         win.chk_alpha.setChecked(True)

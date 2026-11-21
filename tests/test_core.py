@@ -191,3 +191,39 @@ def test_exr_alpha_read(tmp_path):
     assert alpha is not None and np.abs(alpha - a).max() < 1e-3
     write_exr(tmp_path / "b.exr", rgb)
     assert read_exr_rgba(tmp_path / "b.exr")[1] is None
+
+
+def test_resolve_pasted_paths(tmp_path, monkeypatch):
+    from exr_converter.core.paths import resolve_pasted
+    seq_dir = tmp_path / "render dir"
+    seq_dir.mkdir()
+    for f in (1001, 1002, 1003):
+        (seq_dir / f"shot.{f}.exr").write_bytes(b"x")
+    first = seq_dir / "shot.1001.exr"
+    mixed = tmp_path / "stills"
+    mixed.mkdir()
+    for n in ("a.exr", "b.exr", "notes.txt"):
+        (mixed / n).write_bytes(b"x")
+    monkeypatch.setenv("RENDERS", str(tmp_path))
+
+    def files(text):
+        return resolve_pasted(text)[0]
+
+    assert files(str(first)) == [first]
+    assert files(f'  "{first}"  ') == [first]
+    assert files(f"'{first}'") == [first]
+    assert files("file://" + str(first).replace(" ", "%20")) == [first]
+    assert files("$RENDERS/render dir/shot.1002.exr") == [seq_dir / "shot.1002.exr"]
+    assert files(str(seq_dir / "shot.####.exr")) == [first]
+    assert files(str(seq_dir / "shot.%04d.exr") + " 1001-1003") == [first]
+    assert files(str(seq_dir / "shot.@@@@.exr")) == [first]
+    assert files(str(seq_dir)) == [first]                      # folder with one sequence
+    assert files(str(mixed) + "/") == [mixed / "a.exr", mixed / "b.exr"]
+    assert files(f"{first}\n{mixed / 'b.exr'}\n") == [first, mixed / "b.exr"]
+
+    f, problems = resolve_pasted("Z:\\jobs\\shot.1001.exr")
+    assert not f and "Windows" in problems[0]
+    f, problems = resolve_pasted(str(mixed / "notes.txt"))
+    assert not f and "Not an EXR" in problems[0]
+    f, problems = resolve_pasted(str(tmp_path / "nope.exr"))
+    assert not f and "Not found" in problems[0]
