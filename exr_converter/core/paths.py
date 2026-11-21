@@ -28,6 +28,7 @@ _WINDOWS_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
 
 def _clean(line: str) -> str:
     s = line.strip().strip("​").strip()
+    s = _RANGE_RE.sub("", s).strip()  # '"shot.####.exr" 1001-1100': drop the range before the quotes
     if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
         s = s[1:-1].strip()
     if s.lower().startswith("file:"):

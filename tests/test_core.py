@@ -217,6 +217,7 @@ def test_resolve_pasted_paths(tmp_path, monkeypatch):
     assert files(str(seq_dir / "shot.####.exr")) == [first]
     assert files(str(seq_dir / "shot.%04d.exr") + " 1001-1003") == [first]
     assert files(str(seq_dir / "shot.@@@@.exr")) == [first]
+    assert files(f'"{seq_dir / "shot.####.exr"}" 1001-1003') == [first]
     assert files(str(seq_dir)) == [first]                      # folder with one sequence
     assert files(str(mixed) + "/") == [mixed / "a.exr", mixed / "b.exr"]
     assert files(f"{first}\n{mixed / 'b.exr'}\n") == [first, mixed / "b.exr"]

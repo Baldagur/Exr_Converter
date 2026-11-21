@@ -153,7 +153,19 @@ def _gui_test(out, frames, engine, check, alpha_exr):
 
         from .ui.main_window import MainWindow
 
+        from PySide6.QtWidgets import QMessageBox
+
         app = QApplication.instance() or QApplication([])
+
+        def no_modal(kind):  # a dialog would block a headless run forever: report and fail instead
+            def show(parent, title, text, *a, **k):
+                check(False, f"GUI {kind} dialog: {text}")
+                return QMessageBox.Yes
+            return show
+
+        QMessageBox.warning = no_modal("warning")
+        QMessageBox.critical = no_modal("error")
+        QMessageBox.question = no_modal("question")
         win = MainWindow(engine)
         win.show()
         win.open_files([frames[0]])
